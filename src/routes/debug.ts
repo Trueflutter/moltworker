@@ -14,7 +14,7 @@ debug.get('/version', async (c) => {
   const sandbox = c.get('sandbox');
   try {
     // Get moltbot version (CLI is still named clawdbot until upstream renames)
-    const versionProcess = await sandbox.startProcess('clawdbot --version');
+    const versionProcess = await sandbox.startProcess('openclaw --version');
     await new Promise(resolve => setTimeout(resolve, 500));
     const versionLogs = await versionProcess.getLogs();
     const moltbotVersion = (versionLogs.stdout || versionLogs.stderr || '').trim();
@@ -124,16 +124,19 @@ debug.get('/gateway-api', async (c) => {
 });
 
 // GET /debug/cli - Test moltbot CLI commands (CLI is still named clawdbot)
+// Supports ?timeout=N parameter for long-running commands (default 15s, max 120s)
 debug.get('/cli', async (c) => {
   const sandbox = c.get('sandbox');
-  const cmd = c.req.query('cmd') || 'clawdbot --help';
-  
+  const cmd = c.req.query('cmd') || 'openclaw --help';
+  const timeoutSecs = Math.min(parseInt(c.req.query('timeout') || '15', 10), 120);
+  const maxAttempts = timeoutSecs * 2; // 500ms per attempt
+
   try {
     const proc = await sandbox.startProcess(cmd);
-    
-    // Wait longer for command to complete
+
+    // Wait for command to complete (configurable timeout)
     let attempts = 0;
-    while (attempts < 30) {
+    while (attempts < maxAttempts) {
       await new Promise(r => setTimeout(r, 500));
       if (proc.status !== 'running') break;
       attempts++;
@@ -145,6 +148,7 @@ debug.get('/cli', async (c) => {
       status: proc.status,
       exitCode: proc.exitCode,
       attempts,
+      timeoutSecs,
       stdout: logs.stdout || '',
       stderr: logs.stderr || '',
     });
@@ -333,6 +337,110 @@ debug.get('/ws-test', async (c) => {
 </body>
 </html>`;
   
+  return c.html(html);
+});
+
+// GET /debug/terminal - Interactive terminal page for running CLI commands
+debug.get('/terminal', async (c) => {
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <title>Moltbot Terminal</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #0f0; margin: 0; }
+    h1 { color: #0f0; }
+    #output {
+      white-space: pre;
+      background: #000;
+      padding: 15px;
+      min-height: 400px;
+      overflow: auto;
+      border: 1px solid #333;
+      font-size: 12px;
+      line-height: 1.2;
+    }
+    .input-row { margin: 10px 0; display: flex; gap: 10px; }
+    input {
+      padding: 10px;
+      flex: 1;
+      background: #000;
+      color: #0f0;
+      border: 1px solid #333;
+      font-family: monospace;
+    }
+    button {
+      padding: 10px 20px;
+      background: #333;
+      color: #0f0;
+      border: 1px solid #0f0;
+      cursor: pointer;
+    }
+    button:hover { background: #444; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .status { color: #ff0; margin: 10px 0; }
+    .quick-cmds { margin: 10px 0; }
+    .quick-cmds button { margin-right: 5px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Moltbot Terminal</h1>
+  <div class="quick-cmds">
+    Quick commands:
+    <button onclick="runCmd('openclaw --version')">Version</button>
+    <button onclick="runCmd('openclaw channels list')">List Channels</button>
+    <button onclick="runCmd('openclaw channels login', 90)">Channel Login (QR)</button>
+    <button onclick="runCmd('openclaw status')">Status</button>
+  </div>
+  <div class="input-row">
+    <input id="cmd" value="openclaw --help" placeholder="Enter command..." />
+    <button id="run" onclick="runCmd()">Run</button>
+  </div>
+  <div class="status" id="status"></div>
+  <div id="output">Ready. Enter a command above.</div>
+
+  <script>
+    async function runCmd(cmd, timeout = 15) {
+      const cmdInput = document.getElementById('cmd');
+      const output = document.getElementById('output');
+      const status = document.getElementById('status');
+      const runBtn = document.getElementById('run');
+
+      if (cmd) cmdInput.value = cmd;
+      const command = cmdInput.value;
+
+      output.textContent = 'Running: ' + command + '\\n(timeout: ' + timeout + 's)\\n\\n';
+      status.textContent = 'Status: Running... (may take up to ' + timeout + 's)';
+      runBtn.disabled = true;
+
+      try {
+        const resp = await fetch('/debug/cli?cmd=' + encodeURIComponent(command) + '&timeout=' + timeout);
+        const data = await resp.json();
+
+        if (data.error) {
+          output.textContent = 'Error: ' + data.error;
+          status.textContent = 'Status: Error';
+        } else {
+          output.textContent = data.stdout || '(no output)';
+          if (data.stderr) {
+            output.textContent += '\\n\\nSTDERR:\\n' + data.stderr;
+          }
+          status.textContent = 'Status: ' + data.status + ' (exit: ' + data.exitCode + ')';
+        }
+      } catch (e) {
+        output.textContent = 'Request failed: ' + e.message;
+        status.textContent = 'Status: Failed';
+      }
+
+      runBtn.disabled = false;
+    }
+
+    document.getElementById('cmd').addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') runCmd();
+    });
+  </script>
+</body>
+</html>`;
+
   return c.html(html);
 });
 
